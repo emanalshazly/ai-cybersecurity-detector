@@ -53,7 +53,13 @@ class ClaudeAnalyst:
     Uses claude-opus-4-6 with adaptive thinking for deep threat reasoning.
     """
 
-    def __init__(self, alert_store=None, recent_events_cache: list = None):
+    def __init__(
+        self,
+        alert_store=None,
+        recent_events_cache: list = None,
+        campaign_tracker=None,
+        ueba_detector=None,
+    ):
         cfg = get_config()
         if not cfg.anthropic_api_key:
             logger.warning("ANTHROPIC_API_KEY not set — Claude analysis disabled")
@@ -63,6 +69,8 @@ class ClaudeAnalyst:
         self.executor = ToolExecutor(
             alert_store=alert_store,
             recent_events_cache=recent_events_cache or [],
+            campaign_tracker=campaign_tracker,
+            ueba_detector=ueba_detector,
         )
 
     def investigate(self, alert_id: str, threat_candidate: Any) -> AnalysisResult:

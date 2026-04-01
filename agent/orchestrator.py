@@ -1,8 +1,13 @@
 """
 Security Orchestrator — the main agent loop.
-Wires together: ingestors → detectors → Claude analyst → response engine.
+Wires together: ingestors → detectors → analyst → campaign tracker → response.
 
-Runs continuously on a configurable polling interval.
+Enhancement integrations:
+  - StatefulDetector: threshold-based brute force / DoS detection
+  - UEBADetector: per-entity behavioral baselines
+  - CampaignTracker: groups related alerts into campaigns
+  - FeedbackLoop: retrains the ML model from analyst-labeled data
+  - Dashboard push: broadcasts new alerts to WebSocket clients
 """
 
 import asyncio
@@ -17,11 +22,36 @@ from ingestors.base_ingestor import BaseIngestor, NormalizedEvent
 from detectors.base_detector import BaseDetector, ThreatCandidate
 from detectors.isolation_forest import IsolationForestDetector
 from detectors.signature_detector import SignatureDetector
+from detectors.stateful_detector import StatefulDetector
+from detectors.ueba_detector import UEBADetector
 from storage.alert_store import AlertStore, Alert, AlertStatus
+from storage.feedback_loop import FeedbackLoop
 from agent.claude_analyst import ClaudeAnalyst
-from response.approval_gate import ApprovalGate, ActionTier
+from agent.tool_registry import ToolExecutor
+from correlation.campaign_tracker import CampaignTracker
+from response.approval_gate import ApprovalGate
 
 logger = logging.getLogger("SecurityOrchestrator")
+
+# Import MITRE mapping directly (avoid circular imports)
+_RULE_TO_MITRE = {
+    "sql_injection":              ("Initial Access", "T1190"),
+    "path_traversal":             ("Initial Access", "T1190"),
+    "xss_attempt":                ("Initial Access", "T1059"),
+    "http_brute_force":           ("Credential Access", "T1110.003"),
+    "http_brute_force_stateful":  ("Credential Access", "T1110.003"),
+    "ssh_brute_force":            ("Credential Access", "T1110"),
+    "ssh_brute_force_stateful":   ("Credential Access", "T1110"),
+    "directory_scan":             ("Discovery", "T1083"),
+    "directory_scan_stateful":    ("Discovery", "T1083"),
+    "suspicious_user_agent":      ("Reconnaissance", "T1592"),
+    "large_outbound_transfer":    ("Exfiltration", "T1048"),
+    "large_upload":               ("Exfiltration", "T1048"),
+    "server_error_spike":         ("Impact", "T1499"),
+    "dos_indicator_stateful":     ("Impact", "T1499"),
+    "high_request_rate":          ("Impact", "T1499"),
+    "slow_response":              ("Impact", "T1499"),
+}
 
 
 class SecurityOrchestrator:
@@ -30,8 +60,8 @@ class SecurityOrchestrator:
 
     Usage:
         orchestrator = SecurityOrchestrator(ingestors=[MockIngestor()])
-        await orchestrator.run()          # Run indefinitely
-        await orchestrator.run_once()     # Single poll cycle (for testing)
+        await orchestrator.run()
+        await orchestrator.run_once()
     """
 
     def __init__(
@@ -39,37 +69,58 @@ class SecurityOrchestrator:
         ingestors: List[BaseIngestor],
         detectors: Optional[List[BaseDetector]] = None,
         alert_store: Optional[AlertStore] = None,
-        on_alert=None,  # Callback: async fn(alert: Alert, analysis: AnalysisResult)
+        dashboard_manager=None,   # WebSocket manager for live push
     ):
         self.cfg = get_config()
         self.ingestors = ingestors
         self.alert_store = alert_store or AlertStore()
         self._running = False
         self._recent_events: List[NormalizedEvent] = []
-        self._max_event_cache = 1000
+        self._max_event_cache = 2000
+        self._cycle_count = 0
 
-        # Detectors
+        # Build default detector stack if none provided
+        self._iso_detector = IsolationForestDetector()
+        self._ueba_detector = UEBADetector()
         self.detectors = detectors or [
-            IsolationForestDetector(),
+            self._iso_detector,
             SignatureDetector(),
+            StatefulDetector(),
+            self._ueba_detector,
         ]
 
-        # Claude analyst (shares the event cache for tool lookups)
+        # Campaign tracker
+        self.campaign_tracker = CampaignTracker()
+
+        # Feedback loop (retrains ML from FP labels)
+        self.feedback_loop = FeedbackLoop(
+            alert_store=self.alert_store,
+            isolation_forest_detector=self._iso_detector,
+            model_path=self.cfg.model_path,
+        )
+
+        # Claude analyst — passes campaign tracker + UEBA for tool context
         self.analyst = ClaudeAnalyst(
             alert_store=self.alert_store,
             recent_events_cache=self._recent_events,
+            campaign_tracker=self.campaign_tracker,
+            ueba_detector=self._ueba_detector,
         )
 
-        # Approval gate (handles response action tiers)
+        # Approval gate
         self.approval_gate = ApprovalGate(alert_store=self.alert_store)
 
-        # Optional callback for external notification
-        self.on_alert = on_alert
+        # Dashboard WebSocket manager (optional)
+        self._dashboard_manager = dashboard_manager
 
         logger.info(
             f"Orchestrator initialized: {len(self.ingestors)} ingestor(s), "
             f"{len(self.detectors)} detector(s)"
         )
+
+    # ------------------------------------------------------------------
+    # Main loop
+    # ------------------------------------------------------------------
 
     async def run(self) -> None:
         """Run the agent loop indefinitely."""
@@ -87,50 +138,61 @@ class SecurityOrchestrator:
         logger.info("Agent loop stopping")
 
     async def run_once(self) -> List[Alert]:
-        """
-        Execute one full poll cycle.
-        Returns list of Alert objects created in this cycle.
-        """
-        # 1. Ingest new events
+        """Execute one full poll cycle. Returns alerts created this cycle."""
+        self._cycle_count += 1
+
+        # 1. Ingest
         events = self._collect_events()
         if not events:
             return []
+        logger.info(f"[Cycle {self._cycle_count}] Collected {len(events)} events")
 
-        logger.info(f"Collected {len(events)} new events")
-
-        # 2. Update event cache (for tool lookups)
+        # 2. Update event cache
         self._recent_events.extend(events)
         if len(self._recent_events) > self._max_event_cache:
             self._recent_events = self._recent_events[-self._max_event_cache:]
 
-        # 3. Run detectors
+        # 3. Detect
         candidates = self._run_detectors(events)
         if not candidates:
+            # Still check feedback loop periodically
+            if self._cycle_count % 10 == 0:
+                self.feedback_loop.retrain_if_ready()
             return []
 
         logger.info(f"Detectors flagged {len(candidates)} threat candidates")
 
-        # 4. Deduplicate and filter by severity
+        # 4. Deduplicate + filter
         candidates = self._filter_candidates(candidates)
 
-        # 5. Persist as alerts + run Claude analysis
+        # 5. Process each candidate
         created_alerts = []
         for candidate in candidates:
             alert = await self._process_candidate(candidate)
             if alert:
                 created_alerts.append(alert)
 
+        # 6. Prune stale campaigns every 10 cycles
+        if self._cycle_count % 10 == 0:
+            pruned = self.campaign_tracker.prune_old_campaigns()
+            if pruned:
+                logger.info(f"Archived {pruned} stale campaigns")
+            self.feedback_loop.retrain_if_ready()
+
         if created_alerts:
             logger.info(f"Created {len(created_alerts)} alerts this cycle")
 
         return created_alerts
 
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
     def _collect_events(self) -> List[NormalizedEvent]:
         events = []
         for ingestor in self.ingestors:
             try:
-                new_events = ingestor.poll()
-                events.extend(new_events)
+                events.extend(ingestor.poll())
             except Exception as e:
                 logger.error(f"Ingestor {ingestor.name} failed: {e}")
         return events
@@ -150,28 +212,29 @@ class SecurityOrchestrator:
         return candidates
 
     def _filter_candidates(self, candidates: List[ThreatCandidate]) -> List[ThreatCandidate]:
-        """Remove duplicates and apply severity filter."""
         severity_order = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
         min_level = severity_order.get(self.cfg.alert_min_severity, 1)
-
-        # Filter by minimum severity
         filtered = [c for c in candidates if severity_order.get(c.severity, 0) >= min_level]
-
-        # Deduplicate by (source_ip, rule_name) — keep highest severity
+        # Dedup by (ip, rule) — keep highest severity
         seen: dict = {}
         for c in sorted(filtered, key=lambda x: severity_order.get(x.severity, 0), reverse=True):
             key = (c.source_ip or "unknown", c.rule_name or c.detector)
             if key not in seen:
                 seen[key] = c
-
         return list(seen.values())
 
     async def _process_candidate(self, candidate: ThreatCandidate) -> Optional[Alert]:
-        """Persist a threat candidate as an alert and run Claude analysis."""
         alert_id = f"ALERT-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{str(uuid.uuid4())[:8].upper()}"
 
         event = candidate.event
-        raw = event if isinstance(event, dict) else (event.to_dict() if hasattr(event, "to_dict") else vars(event))
+        raw = event if isinstance(event, dict) else (
+            event.to_dict() if hasattr(event, "to_dict") else vars(event)
+        )
+
+        # MITRE tagging
+        mitre_tactic, mitre_technique = _RULE_TO_MITRE.get(
+            candidate.rule_name or "", ("", "")
+        )
 
         alert = Alert(
             id=alert_id,
@@ -179,45 +242,51 @@ class SecurityOrchestrator:
             severity=candidate.severity,
             anomaly_score=candidate.anomaly_score,
             source_ip=candidate.source_ip,
-            source=getattr(event, "source", "unknown"),
+            source=getattr(event, "source", "unknown") if not isinstance(event, dict) else event.get("source", "unknown"),
             detector=candidate.detector,
             rule_name=candidate.rule_name,
             event_details=json.dumps(raw, default=str),
             status=AlertStatus.NEW,
+            mitre_tactic=mitre_tactic or None,
+            mitre_technique=mitre_technique or None,
         )
         self.alert_store.save_alert(alert)
+
+        # Assign to campaign
+        campaign = self.campaign_tracker.link_alert(alert)
+        if campaign:
+            self.alert_store.update_campaign(alert_id, campaign.id)
+            logger.info(f"Alert {alert_id} → Campaign {campaign.id} ({campaign.alert_count} alerts)")
+
         logger.warning(
-            f"[{alert.severity}] {alert_id} | "
-            f"IP={alert.source_ip} | "
-            f"Rule={alert.rule_name or 'anomaly'} | "
-            f"{candidate.description}"
+            f"[{alert.severity}] {alert_id} | IP={alert.source_ip} | "
+            f"Rule={alert.rule_name or 'anomaly'} | MITRE={mitre_tactic or '?'}"
         )
 
-        # Run Claude analysis for HIGH and CRITICAL alerts
+        # Claude analysis for HIGH/CRITICAL
         if candidate.severity in self.cfg.auto_investigate_severities:
             try:
                 analysis = self.analyst.investigate(alert_id, candidate)
                 self.alert_store.update_analysis(
-                    alert_id,
-                    analysis.threat_assessment,
-                    analysis.recommended_actions,
+                    alert_id, analysis.threat_assessment, analysis.recommended_actions
                 )
                 alert.analysis = analysis.threat_assessment
 
-                if analysis.is_likely_false_positive:
-                    logger.info(f"Claude assessed {alert_id} as likely false positive")
-                else:
-                    # Dispatch response actions through the approval gate
+                if not analysis.is_likely_false_positive:
                     await self.approval_gate.evaluate(alert, analysis, candidate)
-
+                else:
+                    logger.info(f"Claude assessed {alert_id} as likely false positive")
             except Exception as e:
                 logger.error(f"Analysis failed for {alert_id}: {e}")
 
-        # Fire external callback if provided
-        if self.on_alert:
+        # Push to dashboard WebSocket
+        if self._dashboard_manager:
             try:
-                await self.on_alert(alert)
-            except Exception as e:
-                logger.error(f"on_alert callback failed: {e}")
+                await self._dashboard_manager.broadcast({
+                    "type": "new_alert",
+                    "alert": alert.to_dict(),
+                })
+            except Exception:
+                pass
 
         return alert

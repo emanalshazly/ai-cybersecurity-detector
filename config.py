@@ -50,10 +50,23 @@ class AgentConfig:
     ])
 
     # Response actions (approval tiers)
-    # TIER_1: auto-execute (log, notify)
-    # TIER_2: auto-execute with audit trail (rate-limit, watchlist)
-    # TIER_3: hold for human approval (block IP, quarantine)
     auto_block_critical: bool = os.environ.get("AUTO_BLOCK_CRITICAL", "false").lower() == "true"
+
+    # AbuseIPDB (Enhancement #3 — real IP reputation)
+    abuseipdb_key: Optional[str] = field(default_factory=lambda: os.environ.get("ABUSEIPDB_KEY"))
+
+    # Dashboard
+    dashboard_host: str = os.environ.get("DASHBOARD_HOST", "0.0.0.0")
+    dashboard_port: int = int(os.environ.get("DASHBOARD_PORT", "8000"))
+
+    # Syslog receiver
+    syslog_host: str = os.environ.get("SYSLOG_HOST", "0.0.0.0")
+    syslog_port: int = int(os.environ.get("SYSLOG_PORT", "5140"))
+    enable_syslog: bool = os.environ.get("ENABLE_SYSLOG", "false").lower() == "true"
+
+    # Feedback loop
+    feedback_min_labels: int = int(os.environ.get("FEEDBACK_MIN_LABELS", "30"))
+    feedback_retrain_interval_hours: int = int(os.environ.get("FEEDBACK_RETRAIN_HOURS", "6"))
 
 
 # Global singleton config

@@ -9,7 +9,8 @@ from enum import Enum
 from typing import Optional, List
 
 from sqlalchemy import (
-    create_engine, Column, String, Float, DateTime, Boolean, Text, Integer, Enum as SAEnum
+    create_engine, Column, String, Float, DateTime, Boolean, Text, Integer,
+    Enum as SAEnum, event as sa_event
 )
 from sqlalchemy.orm import DeclarativeBase, Session
 
@@ -46,6 +47,9 @@ class Alert(Base):
     is_false_positive = Column(Boolean, default=False, nullable=False)
     analyst_notes = Column(Text, nullable=True)        # Human analyst feedback
     resolved_at = Column(DateTime, nullable=True)
+    mitre_tactic = Column(String, nullable=True)       # e.g., "Credential Access"
+    mitre_technique = Column(String, nullable=True)    # e.g., "T1110"
+    campaign_id = Column(String, nullable=True)        # FK to campaign tracker
 
     def to_dict(self) -> dict:
         return {
@@ -63,6 +67,9 @@ class Alert(Base):
             "status": self.status.value if self.status else None,
             "is_false_positive": self.is_false_positive,
             "analyst_notes": self.analyst_notes,
+            "mitre_tactic": self.mitre_tactic,
+            "mitre_technique": self.mitre_technique,
+            "campaign_id": self.campaign_id,
         }
 
 
@@ -131,3 +138,50 @@ class AlertStore:
                 alert.recommended_actions = json.dumps(recommended_actions)
                 alert.status = AlertStatus.INVESTIGATING
                 session.commit()
+
+    def update_mitre(self, alert_id: str, tactic: str, technique: str) -> None:
+        with Session(self.engine) as session:
+            alert = session.get(Alert, alert_id)
+            if alert:
+                alert.mitre_tactic = tactic
+                alert.mitre_technique = technique
+                session.commit()
+
+    def update_campaign(self, alert_id: str, campaign_id: str) -> None:
+        with Session(self.engine) as session:
+            alert = session.get(Alert, alert_id)
+            if alert:
+                alert.campaign_id = campaign_id
+                session.commit()
+
+    def get_labeled_training_data(self) -> List[dict]:
+        """Return alerts that have been labeled as TP or FP, with event_details for retraining."""
+        with Session(self.engine) as session:
+            alerts = (
+                session.query(Alert)
+                .filter(Alert.status.in_([AlertStatus.FALSE_POSITIVE, AlertStatus.CONFIRMED]))
+                .filter(Alert.event_details.isnot(None))
+                .all()
+            )
+            result = []
+            for a in alerts:
+                try:
+                    event = json.loads(a.event_details)
+                    result.append({
+                        "alert_id": a.id,
+                        "is_false_positive": a.is_false_positive,
+                        "event": event,
+                    })
+                except Exception:
+                    pass
+            return result
+
+    def get_alerts_in_range(self, start: datetime, end: datetime) -> List[dict]:
+        with Session(self.engine) as session:
+            alerts = (
+                session.query(Alert)
+                .filter(Alert.timestamp >= start, Alert.timestamp <= end)
+                .order_by(Alert.timestamp.desc())
+                .all()
+            )
+            return [a.to_dict() for a in alerts]

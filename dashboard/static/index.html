@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Cybersecurity Agent</title>
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --border: #30363d;
+    --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
+    --critical: #f85149; --high: #d29922; --medium: #e3b341;
+    --low: #3fb950; --info: #79c0ff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         background: var(--bg); color: var(--text); height: 100vh;
+         display: flex; flex-direction: column; }
+
+  /* Header */
+  header { background: var(--surface); border-bottom: 1px solid var(--border);
+           padding: 14px 24px; display: flex; align-items: center; gap: 16px; }
+  header h1 { font-size: 1.1em; color: var(--accent); }
+  .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--low);
+              animation: pulse 2s infinite; margin-left: auto; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+  .ws-status { font-size: 0.8em; color: var(--muted); }
+
+  /* Stats bar */
+  .stats-bar { display: flex; gap: 16px; padding: 16px 24px;
+               background: var(--surface); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .stat { text-align: center; min-width: 80px; }
+  .stat-val { font-size: 1.8em; font-weight: bold; }
+  .stat-label { font-size: 0.7em; color: var(--muted); text-transform: uppercase; }
+
+  /* Main layout */
+  main { display: flex; flex: 1; overflow: hidden; }
+  .alerts-panel { flex: 1; overflow-y: auto; padding: 16px; }
+  .detail-panel { width: 420px; border-left: 1px solid var(--border);
+                  overflow-y: auto; padding: 20px; background: var(--surface); }
+
+  /* Filters */
+  .filters { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+  .filter-btn { background: var(--surface); border: 1px solid var(--border);
+                color: var(--muted); padding: 4px 12px; border-radius: 20px;
+                cursor: pointer; font-size: 0.8em; transition: all 0.2s; }
+  .filter-btn.active, .filter-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* Alert cards */
+  .alert-card { background: var(--surface); border: 1px solid var(--border);
+                border-radius: 8px; padding: 14px; margin-bottom: 10px;
+                cursor: pointer; transition: border-color 0.2s; border-left: 3px solid transparent; }
+  .alert-card:hover { border-color: var(--accent); }
+  .alert-card.selected { border-left-color: var(--accent); }
+  .alert-card.CRITICAL { border-left-color: var(--critical); }
+  .alert-card.HIGH { border-left-color: var(--high); }
+  .alert-card.MEDIUM { border-left-color: var(--medium); }
+  .alert-card.LOW { border-left-color: var(--low); }
+  .card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .severity-badge { font-size: 0.7em; font-weight: bold; padding: 2px 8px;
+                    border-radius: 12px; text-transform: uppercase; }
+  .CRITICAL .severity-badge { background: rgba(248,81,73,0.2); color: var(--critical); }
+  .HIGH .severity-badge { background: rgba(210,153,34,0.2); color: var(--high); }
+  .MEDIUM .severity-badge { background: rgba(227,179,65,0.2); color: var(--medium); }
+  .LOW .severity-badge { background: rgba(63,185,80,0.2); color: var(--low); }
+  .card-id { font-size: 0.75em; color: var(--muted); font-family: monospace; }
+  .card-meta { font-size: 0.8em; color: var(--muted); }
+  .card-rule { font-size: 0.85em; }
+  .new-badge { font-size: 0.65em; background: var(--accent); color: #000;
+               padding: 1px 6px; border-radius: 10px; margin-left: auto; }
+
+  /* Detail panel */
+  .detail-panel h2 { font-size: 1em; color: var(--accent); margin-bottom: 16px; }
+  .detail-placeholder { color: var(--muted); text-align: center; margin-top: 60px; font-size: 0.9em; }
+  .detail-field { margin-bottom: 12px; }
+  .detail-label { font-size: 0.75em; color: var(--muted); text-transform: uppercase;
+                  letter-spacing: 0.05em; margin-bottom: 3px; }
+  .detail-value { font-size: 0.9em; word-break: break-all; }
+  .analysis-box { background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+                  padding: 12px; font-size: 0.85em; line-height: 1.6; white-space: pre-wrap;
+                  max-height: 300px; overflow-y: auto; margin-top: 4px; }
+  .actions-list { list-style: none; padding: 0; }
+  .actions-list li { padding: 6px 0; border-bottom: 1px solid var(--border);
+                      font-size: 0.85em; display: flex; gap: 8px; }
+  .actions-list li::before { content: "→"; color: var(--accent); }
+  .btn { padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border);
+         cursor: pointer; font-size: 0.8em; transition: all 0.2s; }
+  .btn-fp { background: transparent; color: var(--muted); }
+  .btn-fp:hover { background: rgba(248,81,73,0.1); color: var(--critical); border-color: var(--critical); }
+  .btn-report { background: var(--accent); color: #000; border-color: var(--accent); }
+  .btn-report:hover { opacity: 0.85; }
+  .campaign-tag { font-size: 0.7em; background: rgba(121,192,255,0.15);
+                  color: var(--info); padding: 2px 8px; border-radius: 10px; }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>AI Cybersecurity Agent</h1>
+  <span style="color:var(--muted);font-size:0.8em">Powered by Claude claude-opus-4-6</span>
+  <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
+    <span class="ws-status" id="wsStatus">Connecting…</span>
+    <div class="live-dot" id="liveDot"></div>
+    <button class="btn btn-report" onclick="generateReport()">Generate Report</button>
+  </div>
+</header>
+
+<div class="stats-bar" id="statsBar">
+  <div class="stat"><div class="stat-val" id="statTotal">—</div><div class="stat-label">Total</div></div>
+  <div class="stat"><div class="stat-val" style="color:var(--critical)" id="statCritical">—</div><div class="stat-label">Critical</div></div>
+  <div class="stat"><div class="stat-val" style="color:var(--high)" id="statHigh">—</div><div class="stat-label">High</div></div>
+  <div class="stat"><div class="stat-val" style="color:var(--medium)" id="statMedium">—</div><div class="stat-label">Medium</div></div>
+  <div class="stat"><div class="stat-val" style="color:var(--low)" id="statLow">—</div><div class="stat-label">Low</div></div>
+  <div class="stat"><div class="stat-val" style="color:var(--muted)" id="statFP">—</div><div class="stat-label">FP Rate</div></div>
+</div>
+
+<main>
+  <div class="alerts-panel">
+    <div class="filters">
+      <button class="filter-btn active" onclick="setFilter('ALL', this)">All</button>
+      <button class="filter-btn" style="color:var(--critical)" onclick="setFilter('CRITICAL', this)">Critical</button>
+      <button class="filter-btn" style="color:var(--high)" onclick="setFilter('HIGH', this)">High</button>
+      <button class="filter-btn" style="color:var(--medium)" onclick="setFilter('MEDIUM', this)">Medium</button>
+      <button class="filter-btn" style="color:var(--low)" onclick="setFilter('LOW', this)">Low</button>
+    </div>
+    <div id="alertList"></div>
+  </div>
+
+  <div class="detail-panel" id="detailPanel">
+    <div class="detail-placeholder">Select an alert to see full details and AI analysis</div>
+  </div>
+</main>
+
+<script>
+let alerts = [];
+let selectedId = null;
+let currentFilter = 'ALL';
+let ws = null;
+let newAlertIds = new Set();
+
+// ── API helpers ────────────────────────────────────────────────────────────
+async function api(path, opts = {}) {
+  const r = await fetch(path, opts);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+// ── Load data ──────────────────────────────────────────────────────────────
+async function loadStats() {
+  try {
+    const s = await api('/api/stats');
+    document.getElementById('statTotal').textContent = s.total ?? '—';
+    document.getElementById('statCritical').textContent = s.by_severity?.CRITICAL ?? 0;
+    document.getElementById('statHigh').textContent = s.by_severity?.HIGH ?? 0;
+    document.getElementById('statMedium').textContent = s.by_severity?.MEDIUM ?? 0;
+    document.getElementById('statLow').textContent = s.by_severity?.LOW ?? 0;
+    document.getElementById('statFP').textContent = ((s.fp_rate ?? 0) * 100).toFixed(1) + '%';
+  } catch (e) { console.error('Stats error:', e); }
+}
+
+async function loadAlerts() {
+  try {
+    const sev = currentFilter === 'ALL' ? '' : `&severity=${currentFilter}`;
+    const data = await api(`/api/alerts?limit=100${sev}`);
+    alerts = data.alerts || [];
+    renderAlerts();
+  } catch (e) { console.error('Alerts error:', e); }
+}
+
+// ── Render ─────────────────────────────────────────────────────────────────
+function renderAlerts() {
+  const list = document.getElementById('alertList');
+  if (!alerts.length) {
+    list.innerHTML = '<p style="color:var(--muted);text-align:center;padding:40px">No alerts</p>';
+    return;
+  }
+  list.innerHTML = alerts.map(a => {
+    const isNew = newAlertIds.has(a.id);
+    const ts = a.timestamp ? new Date(a.timestamp).toLocaleTimeString() : '?';
+    const rule = a.rule_name || 'ML anomaly';
+    return `
+    <div class="alert-card ${a.severity} ${selectedId === a.id ? 'selected' : ''}"
+         onclick="selectAlert('${a.id}')">
+      <div class="card-header">
+        <span class="severity-badge">${a.severity}</span>
+        <span class="card-id">${a.id}</span>
+        ${isNew ? '<span class="new-badge">NEW</span>' : ''}
+      </div>
+      <div class="card-rule">${rule}</div>
+      <div class="card-meta">
+        IP: ${a.source_ip || '?'} &nbsp;|&nbsp; ${ts}
+        ${a.is_false_positive ? ' &nbsp;|&nbsp; <span style="color:var(--muted)">FP</span>' : ''}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function selectAlert(id) {
+  selectedId = id;
+  newAlertIds.delete(id);
+  renderAlerts();
+  const panel = document.getElementById('detailPanel');
+  panel.innerHTML = '<div class="detail-placeholder">Loading…</div>';
+  try {
+    const a = await api(`/api/alerts/${id}`);
+    const actions = (a.recommended_actions || []).map(act => `<li>${act}</li>`).join('');
+    const analysis = a.analysis || '<span style="color:var(--muted)">No analysis available</span>';
+    panel.innerHTML = `
+      <h2>Alert Detail</h2>
+      <div class="detail-field">
+        <div class="detail-label">ID</div>
+        <div class="detail-value" style="font-family:monospace;font-size:0.8em">${a.id}</div>
+      </div>
+      <div class="detail-field">
+        <div class="detail-label">Severity</div>
+        <div class="detail-value"><span class="severity-badge ${a.severity}">${a.severity}</span></div>
+      </div>
+      <div class="detail-field">
+        <div class="detail-label">Source IP</div>
+        <div class="detail-value">${a.source_ip || '—'}</div>
+      </div>
+      <div class="detail-field">
+        <div class="detail-label">Detection Rule</div>
+        <div class="detail-value"><code>${a.rule_name || 'ML anomaly'}</code></div>
+      </div>
+      <div class="detail-field">
+        <div class="detail-label">Detector</div>
+        <div class="detail-value">${a.detector || '—'}</div>
+      </div>
+      <div class="detail-field">
+        <div class="detail-label">Time</div>
+        <div class="detail-value">${a.timestamp || '—'}</div>
+      </div>
+      <div class="detail-field">
+        <div class="detail-label">Claude AI Analysis</div>
+        <div class="analysis-box">${analysis}</div>
+      </div>
+      ${actions ? `<div class="detail-field">
+        <div class="detail-label">Recommended Actions</div>
+        <ul class="actions-list">${actions}</ul>
+      </div>` : ''}
+      <div style="margin-top:16px;display:flex;gap:8px">
+        <button class="btn btn-fp" onclick="markFP('${a.id}')">Mark False Positive</button>
+      </div>`;
+  } catch (e) {
+    panel.innerHTML = `<div class="detail-placeholder">Error loading alert: ${e.message}</div>`;
+  }
+}
+
+async function markFP(id) {
+  try {
+    await api(`/api/alerts/${id}/fp`, { method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({notes: 'Marked via dashboard'})
+    });
+    await loadAlerts();
+    if (selectedId === id) selectAlert(id);
+  } catch (e) { alert('Error: ' + e.message); }
+}
+
+async function generateReport() {
+  try {
+    const r = await api('/api/report', { method: 'POST' });
+    alert('Report generated: ' + r.path);
+  } catch (e) { alert('Error: ' + e.message); }
+}
+
+function setFilter(sev, btn) {
+  currentFilter = sev;
+  document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  loadAlerts();
+}
+
+// ── WebSocket ──────────────────────────────────────────────────────────────
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws/live`);
+
+  ws.onopen = () => {
+    document.getElementById('wsStatus').textContent = 'Live';
+    document.getElementById('liveDot').style.background = 'var(--low)';
+  };
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'new_alert') {
+      const alert = msg.alert;
+      newAlertIds.add(alert.id);
+      alerts.unshift(alert);
+      if (alerts.length > 200) alerts.pop();
+      renderAlerts();
+      loadStats();
+    }
+  };
+  ws.onclose = () => {
+    document.getElementById('wsStatus').textContent = 'Reconnecting…';
+    document.getElementById('liveDot').style.background = 'var(--critical)';
+    setTimeout(connectWS, 3000);
+  };
+  ws.onerror = () => ws.close();
+}
+
+// ── Init ───────────────────────────────────────────────────────────────────
+(async () => {
+  await Promise.all([loadStats(), loadAlerts()]);
+  connectWS();
+  setInterval(() => { loadStats(); loadAlerts(); }, 30000);
+})();
+</script>
+</body>
+</html>

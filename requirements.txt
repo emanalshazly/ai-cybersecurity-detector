@@ -10,7 +10,6 @@ seaborn>=0.11.0
 anthropic>=0.40.0
 
 # Async & CLI
-asyncio-throttle>=1.0.0
 rich>=13.0.0
 click>=8.1.0
 
@@ -25,11 +24,14 @@ sqlalchemy>=2.0.0
 watchdog>=3.0.0
 aiofiles>=23.0.0
 
-# HTTP notifications (Slack, webhooks)
+# HTTP notifications (Slack, webhooks) + AbuseIPDB
 httpx>=0.27.0
 
-# Network analysis (optional - for packet capture)
-# scapy>=2.5.0
+# Dashboard (Enhancement #6)
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+pydantic>=2.0.0
+websockets>=12.0
 
-# IP reputation (optional)
-# requests>=2.31.0
+# Network analysis (optional — for packet capture)
+# scapy>=2.5.0
